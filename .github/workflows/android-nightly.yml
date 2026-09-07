@@ -2,8 +2,8 @@ name: Android Nightly
 
 on:
   schedule:
-    # Upstream moves often; check a few times a day.
-    - cron: "17 */6 * * *"
+    # Four checks per hour; builds only when upstream apps/mobile moved.
+    - cron: "0,15,30,45 * * * *"
   workflow_dispatch:
 
 concurrency:
@@ -19,6 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       should_build: ${{ steps.sync.outputs.should_build }}
+      synced: ${{ steps.sync.outputs.synced }}
       upstream_sha: ${{ steps.sync.outputs.upstream_sha }}
       short_sha: ${{ steps.sync.outputs.short_sha }}
     steps:
@@ -49,28 +50,53 @@ jobs:
             main_sha=""
           fi
 
-          should_build=false
+          synced=false
           if [ "$main_sha" != "$upstream_sha" ]; then
             git push origin "upstream/main:refs/heads/main"
-            should_build=true
+            synced=true
             echo "Updated origin/main to $short_sha"
           else
             echo "origin/main already at upstream ($short_sha)"
           fi
+          echo "synced=$synced" >> "$GITHUB_OUTPUT"
 
+          should_build=false
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Manual dispatch; forcing a build"
             should_build=true
-          fi
-
-          if ! gh release list --repo "${{ github.repository }}" --limit 100 | grep -qi 'Pre-release'; then
-            echo "No prerelease exists yet; forcing a build"
-            should_build=true
+          else
+            last_tag="$(
+              gh release list --repo "${{ github.repository }}" --limit 100 \
+                --json tagName,isPrerelease \
+                --jq '[.[] | select(.isPrerelease)][0].tagName // empty'
+            )"
+            if [ -z "$last_tag" ]; then
+              echo "No prerelease exists yet; forcing a build"
+              should_build=true
+            elif [[ "$last_tag" != nightly-* ]]; then
+              echo "Latest prerelease tag '$last_tag' is not a nightly-*; forcing a build"
+              should_build=true
+            else
+              last_short="${last_tag#nightly-}"
+              if ! last_sha="$(git rev-parse --verify "${last_short}^{commit}" 2>/dev/null)"; then
+                echo "Could not resolve last nightly commit '$last_short'; forcing a build"
+                should_build=true
+              elif [ "$last_sha" = "$upstream_sha" ]; then
+                echo "Already built upstream tip $short_sha; skipping"
+              elif git diff --name-only "$last_sha" "$upstream_sha" -- apps/mobile | grep -q .; then
+                echo "Upstream apps/mobile changed since $last_tag; building"
+                git diff --name-only "$last_sha" "$upstream_sha" -- apps/mobile | head -50
+                should_build=true
+              else
+                echo "No apps/mobile changes since $last_tag; skipping build"
+              fi
+            fi
           fi
 
           echo "should_build=$should_build" >> "$GITHUB_OUTPUT"
 
       - name: Cancel inherited upstream workflow runs on main
-        if: steps.sync.outputs.should_build == 'true'
+        if: steps.sync.outputs.synced == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
