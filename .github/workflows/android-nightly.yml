@@ -62,12 +62,31 @@ jobs:
             should_build=true
           fi
 
-          if ! gh release list --repo "${{ github.repository }}" --limit 100 | grep -q $'\tpre-\t'; then
+          if ! gh release list --repo "${{ github.repository }}" --limit 100 | grep -qi 'Pre-release'; then
             echo "No prerelease exists yet; forcing a build"
             should_build=true
           fi
 
           echo "should_build=$should_build" >> "$GITHUB_OUTPUT"
+
+      - name: Cancel inherited upstream workflow runs on main
+        if: steps.sync.outputs.should_build == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Pushing upstream commits onto main can enqueue Blacksmith/EAS workflows
+          # that do not exist on this fork's default branch. Cancel them and disable
+          # any non-nightly workflows that become visible.
+          sleep 20
+          gh run list --repo "${{ github.repository }}" --branch main --limit 30             --json databaseId,name,status,workflowName             --jq '.[] | select(.workflowName != "Android Nightly") | select(.status == "queued" or .status == "in_progress" or .status == "pending") | .databaseId'             | while read -r id; do
+                echo "Canceling run $id"
+                gh run cancel "$id" --repo "${{ github.repository }}" || true
+              done
+          gh api "repos/${{ github.repository }}/actions/workflows" --paginate             --jq '.workflows[] | select(.path != ".github/workflows/android-nightly.yml") | select(.state == "active") | [.id, .path] | @tsv'             | while IFS=$'\t' read -r id wpath; do
+                echo "Disabling workflow $wpath ($id)"
+                gh api -X PUT "repos/${{ github.repository }}/actions/workflows/$id/disable" || true
+              done
 
   build:
     name: Build and publish APK
