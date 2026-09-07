@@ -1,0 +1,204 @@
+name: Android Nightly
+
+on:
+  schedule:
+    # Upstream moves often; check a few times a day.
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: android-nightly
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    name: Sync main from upstream
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.sync.outputs.should_build }}
+      upstream_sha: ${{ steps.sync.outputs.upstream_sha }}
+      short_sha: ${{ steps.sync.outputs.short_sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Sync upstream main into origin/main
+        id: sync
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/pingdotgg/t3code.git 2>/dev/null || git remote set-url upstream https://github.com/pingdotgg/t3code.git
+          git fetch --no-tags upstream main
+          git fetch --no-tags origin main || true
+
+          upstream_sha="$(git rev-parse upstream/main)"
+          short_sha="$(git rev-parse --short=12 upstream/main)"
+          echo "upstream_sha=$upstream_sha" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
+
+          if git rev-parse --verify origin/main >/dev/null 2>&1; then
+            main_sha="$(git rev-parse origin/main)"
+          else
+            main_sha=""
+          fi
+
+          should_build=false
+          if [ "$main_sha" != "$upstream_sha" ]; then
+            git push origin "upstream/main:refs/heads/main"
+            should_build=true
+            echo "Updated origin/main to $short_sha"
+          else
+            echo "origin/main already at upstream ($short_sha)"
+          fi
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            should_build=true
+          fi
+
+          if ! gh release list --repo "${{ github.repository }}" --limit 100 | grep -q $'\tpre-\t'; then
+            echo "No prerelease exists yet; forcing a build"
+            should_build=true
+          fi
+
+          echo "should_build=$should_build" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build and publish APK
+    needs: sync
+    if: needs.sync.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      APP_VARIANT: preview
+      NODE_OPTIONS: --max-old-space-size=8192
+      EXPO_NO_GIT_STATUS: "1"
+      GRADLE_OPTS: -Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx6g
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: tools platform-tools platforms;android-36 build-tools;36.0.0 ndk;27.1.12297006 cmake;3.22.1
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: |
+            args:
+              - --filter=@t3tools/mobile...
+
+      - name: Expose pnpm
+        run: |
+          pnpm_version="$(node --print "require('./package.json').packageManager.split('@').pop()")"
+          vp_pnpm_bin="$HOME/.vite-plus/package_manager/pnpm/$pnpm_version/pnpm/bin"
+          echo "$vp_pnpm_bin" >> "$GITHUB_PATH"
+          "$vp_pnpm_bin/pnpm" --version
+
+      - name: Retarget nightly Android identity
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          path = Path("apps/mobile/app.config.ts")
+          text = path.read_text()
+          replacements = [
+            ('appName: "T3 Code Preview"', 'appName: "T3 Code Nightly"'),
+            ('androidPackage: "com.t3tools.t3code.preview"', 'androidPackage: "com.vibedbykaki.t3code.nightly"'),
+            ("scheme: \"t3code-preview\"", "scheme: \"t3code-nightly\""),
+          ]
+          for old, new in replacements:
+            if old not in text:
+              raise SystemExit(f"missing expected snippet: {old}")
+            text = text.replace(old, new, 1)
+          needle = "updates: {\n    enabled: true,"
+          if needle not in text:
+            raise SystemExit("missing updates.enabled block")
+          text = text.replace(needle, "updates: {\n    enabled: false,", 1)
+          path.write_text(text)
+          print("Retargeted preview variant for nightly APK builds")
+          PY
+
+      - name: Install stable APK signing keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ANDROID_KEYSTORE_BASE64:-}" ]; then
+            echo "ANDROID_KEYSTORE_BASE64 secret is required" >&2
+            exit 1
+          fi
+          mkdir -p "$HOME/.android"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$HOME/.android/debug.keystore"
+          # Standard Android debug alias/passwords; keystore itself is our stable nightly key.
+          keytool -list -keystore "$HOME/.android/debug.keystore" -storepass android >/dev/null
+
+      - name: Expo prebuild (Android)
+        working-directory: apps/mobile
+        run: pnpm exec expo prebuild --platform android --clean --non-interactive
+
+      - name: Build debug APK
+        working-directory: apps/mobile/android
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Stage APK
+        id: apk
+        run: |
+          set -euo pipefail
+          src="apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk"
+          test -f "$src"
+          short_sha="${{ needs.sync.outputs.short_sha }}"
+          mkdir -p dist
+          out="dist/t3-code-nightly-${short_sha}.apk"
+          cp "$src" "$out"
+          echo "path=$out" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "$out")" >> "$GITHUB_OUTPUT"
+          ls -lh "$out"
+
+      - name: Publish prerelease
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          short_sha="${{ needs.sync.outputs.short_sha }}"
+          upstream_sha="${{ needs.sync.outputs.upstream_sha }}"
+          tag="nightly-${short_sha}"
+          title="Nightly ${short_sha}"
+          notes="$(printf '%s\n' \
+            "Unofficial Android nightly of T3 Code." \
+            "" \
+            "- Upstream commit: [\`${short_sha}\`](https://github.com/pingdotgg/t3code/commit/${upstream_sha})" \
+            "- Package: \`com.vibedbykaki.t3code.nightly\`" \
+            "- Built from \`main\` by [Android Nightly](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" \
+          )"
+
+          if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release upload "$tag" "${{ steps.apk.outputs.path }}" --repo "${{ github.repository }}" --clobber
+            gh release edit "$tag" --repo "${{ github.repository }}" --prerelease --notes "$notes" --title "$title"
+          else
+            gh release create "$tag" "${{ steps.apk.outputs.path }}" \
+              --repo "${{ github.repository }}" \
+              --prerelease \
+              --title "$title" \
+              --notes "$notes"
+          fi
