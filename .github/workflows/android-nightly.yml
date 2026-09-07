@@ -79,11 +79,16 @@ jobs:
           # that do not exist on this fork's default branch. Cancel them and disable
           # any non-nightly workflows that become visible.
           sleep 20
-          gh run list --repo "${{ github.repository }}" --branch main --limit 30             --json databaseId,name,status,workflowName             --jq '.[] | select(.workflowName != "Android Nightly") | select(.status == "queued" or .status == "in_progress" or .status == "pending") | .databaseId'             | while read -r id; do
+          gh run list --repo "${{ github.repository }}" --branch main --limit 30 \
+            --json databaseId,name,status,workflowName \
+            --jq '.[] | select(.workflowName != "Android Nightly") | select(.status == "queued" or .status == "in_progress" or .status == "pending") | .databaseId' \
+            | while read -r id; do
                 echo "Canceling run $id"
                 gh run cancel "$id" --repo "${{ github.repository }}" || true
               done
-          gh api "repos/${{ github.repository }}/actions/workflows" --paginate             --jq '.workflows[] | select(.path != ".github/workflows/android-nightly.yml") | select(.state == "active") | [.id, .path] | @tsv'             | while IFS=$'\t' read -r id wpath; do
+          gh api "repos/${{ github.repository }}/actions/workflows" --paginate \
+            --jq '.workflows[] | select(.path != ".github/workflows/android-nightly.yml") | select(.state == "active") | [.id, .path] | @tsv' \
+            | while IFS=$'\t' read -r id wpath; do
                 echo "Disabling workflow $wpath ($id)"
                 gh api -X PUT "repos/${{ github.repository }}/actions/workflows/$id/disable" || true
               done
@@ -105,6 +110,15 @@ jobs:
         with:
           ref: main
           fetch-depth: 1
+
+      - name: Checkout nightly CI helpers
+        uses: actions/checkout@v5
+        with:
+          ref: dev
+          sparse-checkout: |
+            .github/scripts
+          sparse-checkout-cone-mode: false
+          path: .nightly-ci
 
       - name: Setup Java
         uses: actions/setup-java@v5
@@ -165,26 +179,32 @@ jobs:
             echo "ANDROID_KEYSTORE_BASE64 secret is required" >&2
             exit 1
           fi
-          mkdir -p "$HOME/.android"
+          mkdir -p "$HOME/.android" "$RUNNER_TEMP/nightly-signing"
           printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$HOME/.android/debug.keystore"
+          cp "$HOME/.android/debug.keystore" "$RUNNER_TEMP/nightly-signing/nightly.keystore"
           # Standard Android debug alias/passwords; keystore itself is our stable nightly key.
           keytool -list -keystore "$HOME/.android/debug.keystore" -storepass android >/dev/null
+          echo "NIGHTLY_KEYSTORE=$RUNNER_TEMP/nightly-signing/nightly.keystore" >> "$GITHUB_ENV"
 
       - name: Expo prebuild (Android)
         working-directory: apps/mobile
         run: pnpm exec expo prebuild --platform android --clean --non-interactive
 
-      - name: Build debug APK
+      - name: Configure release signing
+        run: python3 .nightly-ci/.github/scripts/configure-nightly-signing.py
+
+      - name: Build release APK
         working-directory: apps/mobile/android
         run: |
           chmod +x gradlew
-          ./gradlew :app:assembleDebug --no-daemon --stacktrace
+          # Release embeds the JS bundle. Debug only opens the Expo development-client launcher.
+          ./gradlew :app:assembleRelease --no-daemon --stacktrace
 
       - name: Stage APK
         id: apk
         run: |
           set -euo pipefail
-          src="apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk"
+          src="apps/mobile/android/app/build/outputs/apk/release/app-release.apk"
           test -f "$src"
           short_sha="${{ needs.sync.outputs.short_sha }}"
           mkdir -p dist
@@ -208,6 +228,7 @@ jobs:
             "" \
             "- Upstream commit: [\`${short_sha}\`](https://github.com/pingdotgg/t3code/commit/${upstream_sha})" \
             "- Package: \`com.vibedbykaki.t3code.nightly\`" \
+            "- Standalone release APK (not an Expo development client)" \
             "- Built from \`main\` by [Android Nightly](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" \
           )"
 
