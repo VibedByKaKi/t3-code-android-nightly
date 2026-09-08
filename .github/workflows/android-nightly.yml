@@ -50,13 +50,56 @@ jobs:
             main_sha=""
           fi
 
+          # GITHUB_TOKEN cannot create/update workflow files. Mirror upstream
+          # content onto main while pinning origin's .github/workflows so the
+          # push never touches workflows, even when upstream changes them.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           synced=false
-          if [ "$main_sha" != "$upstream_sha" ]; then
-            git push origin "upstream/main:refs/heads/main"
-            synced=true
-            echo "Updated origin/main to $short_sha"
+          needs_mirror=false
+          if [ -z "$main_sha" ]; then
+            needs_mirror=true
+          elif git diff --name-only "$main_sha" "$upstream_sha" | grep -v '^\.github/workflows/' | grep -q .; then
+            needs_mirror=true
           else
-            echo "origin/main already at upstream ($short_sha)"
+            echo "origin/main already mirrors upstream app content ($short_sha)"
+          fi
+
+          if [ "$needs_mirror" = true ]; then
+            if [ -n "$main_sha" ]; then
+              git checkout -B mirror/main "$main_sha"
+            else
+              git checkout -B mirror/main "$upstream_sha"
+            fi
+            git read-tree -um "$upstream_sha"
+            if [ -n "$main_sha" ] && git cat-file -e "$main_sha:.github/workflows" 2>/dev/null; then
+              git checkout "$main_sha" -- .github/workflows
+              while IFS= read -r -d '' path; do
+                if ! git cat-file -e "$main_sha:$path" 2>/dev/null; then
+                  git rm -f --ignore-unmatch -- "$path" || true
+                fi
+              done < <(git ls-files -z -- .github/workflows)
+            else
+              git rm -rf --ignore-unmatch .github/workflows || true
+            fi
+
+            if git diff --cached --quiet && git diff --quiet; then
+              echo "Mirror tree already matches desired state for $short_sha"
+            else
+              git commit -m "chore(mirror): sync upstream ${short_sha}"
+            fi
+
+            tip_sha="$(git rev-parse HEAD)"
+            if [ "$tip_sha" = "$main_sha" ]; then
+              echo "No new mirror commit to push"
+            else
+              # Single commit on top of origin/main: app content from upstream,
+              # workflows unchanged vs origin, so GITHUB_TOKEN can push it.
+              git push origin "HEAD:refs/heads/main"
+              synced=true
+              echo "Updated origin/main to mirror of $short_sha (tip $tip_sha)"
+            fi
           fi
           echo "synced=$synced" >> "$GITHUB_OUTPUT"
 
