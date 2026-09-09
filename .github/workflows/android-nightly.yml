@@ -22,6 +22,7 @@ jobs:
       synced: ${{ steps.sync.outputs.synced }}
       upstream_sha: ${{ steps.sync.outputs.upstream_sha }}
       short_sha: ${{ steps.sync.outputs.short_sha }}
+      previous_sha: ${{ steps.sync.outputs.previous_sha }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -103,37 +104,44 @@ jobs:
           fi
           echo "synced=$synced" >> "$GITHUB_OUTPUT"
 
+          previous_sha=""
+          last_tag="$(
+            gh release list --repo "${{ github.repository }}" --limit 100 \
+              --json tagName,isPrerelease \
+              --jq '[.[] | select(.isPrerelease)][0].tagName // empty'
+          )"
+          if [[ "$last_tag" == nightly-* ]]; then
+            last_short="${last_tag#nightly-}"
+            if previous_sha="$(git rev-parse --verify "${last_short}^{commit}" 2>/dev/null)"; then
+              echo "Previous nightly: $last_tag ($previous_sha)"
+            else
+              echo "Could not resolve previous nightly commit '$last_short'"
+              previous_sha=""
+            fi
+          fi
+          echo "previous_sha=$previous_sha" >> "$GITHUB_OUTPUT"
+
           should_build=false
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "Manual dispatch; forcing a build"
             should_build=true
+          elif [ -z "$last_tag" ]; then
+            echo "No prerelease exists yet; forcing a build"
+            should_build=true
+          elif [[ "$last_tag" != nightly-* ]]; then
+            echo "Latest prerelease tag '$last_tag' is not a nightly-*; forcing a build"
+            should_build=true
+          elif [ -z "$previous_sha" ]; then
+            echo "Could not resolve last nightly commit; forcing a build"
+            should_build=true
+          elif [ "$previous_sha" = "$upstream_sha" ]; then
+            echo "Already built upstream tip $short_sha; skipping"
+          elif git diff --name-only "$previous_sha" "$upstream_sha" -- apps/mobile | grep -q .; then
+            echo "Upstream apps/mobile changed since $last_tag; building"
+            git diff --name-only "$previous_sha" "$upstream_sha" -- apps/mobile | head -50
+            should_build=true
           else
-            last_tag="$(
-              gh release list --repo "${{ github.repository }}" --limit 100 \
-                --json tagName,isPrerelease \
-                --jq '[.[] | select(.isPrerelease)][0].tagName // empty'
-            )"
-            if [ -z "$last_tag" ]; then
-              echo "No prerelease exists yet; forcing a build"
-              should_build=true
-            elif [[ "$last_tag" != nightly-* ]]; then
-              echo "Latest prerelease tag '$last_tag' is not a nightly-*; forcing a build"
-              should_build=true
-            else
-              last_short="${last_tag#nightly-}"
-              if ! last_sha="$(git rev-parse --verify "${last_short}^{commit}" 2>/dev/null)"; then
-                echo "Could not resolve last nightly commit '$last_short'; forcing a build"
-                should_build=true
-              elif [ "$last_sha" = "$upstream_sha" ]; then
-                echo "Already built upstream tip $short_sha; skipping"
-              elif git diff --name-only "$last_sha" "$upstream_sha" -- apps/mobile | grep -q .; then
-                echo "Upstream apps/mobile changed since $last_tag; building"
-                git diff --name-only "$last_sha" "$upstream_sha" -- apps/mobile | head -50
-                should_build=true
-              else
-                echo "No apps/mobile changes since $last_tag; skipping build"
-              fi
-            fi
+            echo "No apps/mobile changes since $last_tag; skipping build"
           fi
 
           echo "should_build=$should_build" >> "$GITHUB_OUTPUT"
@@ -290,24 +298,54 @@ jobs:
           set -euo pipefail
           short_sha="${{ needs.sync.outputs.short_sha }}"
           upstream_sha="${{ needs.sync.outputs.upstream_sha }}"
+          previous_sha="${{ needs.sync.outputs.previous_sha }}"
           tag="nightly-${short_sha}"
           title="Nightly ${short_sha}"
-          notes="$(printf '%s\n' \
-            "Unofficial Android nightly of T3 Code." \
-            "" \
-            "- Upstream commit: [\`${short_sha}\`](https://github.com/pingdotgg/t3code/commit/${upstream_sha})" \
-            "- Package: \`com.vibedbykaki.t3code.nightly\`" \
-            "- Standalone release APK (not an Expo development client)" \
-            "- Built from \`main\` by [Android Nightly](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" \
-          )"
+
+          git remote add upstream https://github.com/pingdotgg/t3code.git 2>/dev/null \
+            || git remote set-url upstream https://github.com/pingdotgg/t3code.git
+          git fetch --no-tags upstream main
+
+          commits_file="$(mktemp)"
+          if [ -n "$previous_sha" ] && [ "$previous_sha" != "$upstream_sha" ]; then
+            git log --reverse --pretty=format:'- [%h](https://github.com/pingdotgg/t3code/commit/%H) %s%n' \
+              "$previous_sha..$upstream_sha" -- apps/mobile > "$commits_file"
+          fi
+
+          if [ ! -s "$commits_file" ]; then
+            if [ -z "$previous_sha" ]; then
+              printf '%s\n' "- Initial nightly build." > "$commits_file"
+            else
+              printf '%s\n' "- No new commits touching \`apps/mobile\` since the previous nightly." > "$commits_file"
+            fi
+          fi
+
+          notes_file="$(mktemp)"
+          {
+            printf '%s\n' \
+              "Unofficial Android nightly of T3 Code." \
+              "" \
+              "- Upstream commit: [\`${short_sha}\`](https://github.com/pingdotgg/t3code/commit/${upstream_sha})" \
+              "- Package: \`com.vibedbykaki.t3code.nightly\`" \
+              "- Standalone release APK (not an Expo development client)" \
+              "- Built from \`main\` by [Android Nightly](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" \
+              "" \
+              "## Commits affecting the Android app" \
+              ""
+            if [ -n "$previous_sha" ]; then
+              prev_short="$(git rev-parse --short=12 "$previous_sha")"
+              printf '%s\n\n' "Since [\`${prev_short}\`](https://github.com/pingdotgg/t3code/commit/${previous_sha}) (commits touching \`apps/mobile\`):"
+            fi
+            cat "$commits_file"
+          } > "$notes_file"
 
           if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
             gh release upload "$tag" "${{ steps.apk.outputs.path }}" --repo "${{ github.repository }}" --clobber
-            gh release edit "$tag" --repo "${{ github.repository }}" --prerelease --notes "$notes" --title "$title"
+            gh release edit "$tag" --repo "${{ github.repository }}" --prerelease --notes-file "$notes_file" --title "$title"
           else
             gh release create "$tag" "${{ steps.apk.outputs.path }}" \
               --repo "${{ github.repository }}" \
               --prerelease \
               --title "$title" \
-              --notes "$notes"
+              --notes-file "$notes_file"
           fi
