@@ -2,8 +2,9 @@ name: Android Nightly
 
 on:
   schedule:
-    # Four checks per hour; builds only when upstream apps/mobile moved.
-    - cron: "0,15,30,45 * * * *"
+    # Four checks per hour (off :00 to reduce GitHub schedule drops).
+    # Builds only when upstream apps/mobile moved.
+    - cron: "7,22,37,52 * * * *"
   workflow_dispatch:
 
 concurrency:
