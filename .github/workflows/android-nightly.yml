@@ -107,12 +107,17 @@ jobs:
 
           previous_sha=""
           last_tag="$(
-            gh release list --repo "${{ github.repository }}" --limit 100 \
-              --json tagName,isPrerelease \
-              --jq '[.[] | select(.isPrerelease)][0].tagName // empty'
+            gh api "repos/${{ github.repository }}/releases?per_page=100" \
+              --jq '[.[] | select(.prerelease == true and .draft == false)] | sort_by(.published_at) | reverse | .[0].tag_name // empty'
           )"
-          if [[ "$last_tag" == nightly-* ]]; then
-            last_short="${last_tag#nightly-}"
+          if [[ "$last_tag" =~ ^nightly-[0-9]{8}-[0-9]{6}-([0-9a-f]+)$ ]]; then
+            last_short="${BASH_REMATCH[1]}"
+          elif [[ "$last_tag" =~ ^nightly-([0-9a-f]+)$ ]]; then
+            last_short="${BASH_REMATCH[1]}"
+          else
+            last_short=""
+          fi
+          if [ -n "$last_short" ]; then
             if previous_sha="$(git rev-parse --verify "${last_short}^{commit}" 2>/dev/null)"; then
               echo "Previous nightly: $last_tag ($previous_sha)"
             else
@@ -300,7 +305,13 @@ jobs:
           short_sha="${{ needs.sync.outputs.short_sha }}"
           upstream_sha="${{ needs.sync.outputs.upstream_sha }}"
           previous_sha="${{ needs.sync.outputs.previous_sha }}"
-          tag="nightly-${short_sha}"
+          # Time-prefixed tags sort correctly when clients order by tag name, and
+          # --target must be the built main commit. Defaulting to branch "dev"
+          # made every tag point at the same orphan-branch tip, so created_at
+          # tied and the Releases API fell back to hex tag-name order.
+          built_sha="$(git rev-parse HEAD)"
+          stamp="$(date -u +%Y%m%d-%H%M%S)"
+          tag="nightly-${stamp}-${short_sha}"
           title="Nightly ${short_sha}"
 
           git remote add upstream https://github.com/pingdotgg/t3code.git 2>/dev/null \
@@ -346,6 +357,7 @@ jobs:
           else
             gh release create "$tag" "${{ steps.apk.outputs.path }}" \
               --repo "${{ github.repository }}" \
+              --target "$built_sha" \
               --prerelease \
               --title "$title" \
               --notes-file "$notes_file"
