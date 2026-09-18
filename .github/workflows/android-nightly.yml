@@ -62,10 +62,17 @@ jobs:
           needs_mirror=false
           if [ -z "$main_sha" ]; then
             needs_mirror=true
-          elif git diff --name-only "$main_sha" "$upstream_sha" | grep -v '^\.github/workflows/' | grep -q .; then
-            needs_mirror=true
           else
-            echo "origin/main already mirrors upstream app content ($short_sha)"
+            non_workflow_changes="$(
+              git diff --name-only "$main_sha" "$upstream_sha" \
+                | grep -v '^\.github/workflows/' \
+                || true
+            )"
+            if [ -n "$non_workflow_changes" ]; then
+              needs_mirror=true
+            else
+              echo "origin/main already mirrors upstream app content ($short_sha)"
+            fi
           fi
 
           if [ "$needs_mirror" = true ]; then
@@ -142,12 +149,15 @@ jobs:
             should_build=true
           elif [ "$previous_sha" = "$upstream_sha" ]; then
             echo "Already built upstream tip $short_sha; skipping"
-          elif git diff --name-only "$previous_sha" "$upstream_sha" -- apps/mobile | grep -q .; then
-            echo "Upstream apps/mobile changed since $last_tag; building"
-            git diff --name-only "$previous_sha" "$upstream_sha" -- apps/mobile | head -50
-            should_build=true
           else
-            echo "No apps/mobile changes since $last_tag; skipping build"
+            mobile_changes="$(git diff --name-only "$previous_sha" "$upstream_sha" -- apps/mobile || true)"
+            if [ -n "$mobile_changes" ]; then
+              echo "Upstream apps/mobile changed since $last_tag; building"
+              head -50 <<< "$mobile_changes"
+              should_build=true
+            else
+              echo "No apps/mobile changes since $last_tag; skipping build"
+            fi
           fi
 
           echo "should_build=$should_build" >> "$GITHUB_OUTPUT"
