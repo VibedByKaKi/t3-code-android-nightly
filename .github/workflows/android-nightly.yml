@@ -222,7 +222,8 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
         with:
-          packages: tools platform-tools platforms;android-36 build-tools;36.0.0 ndk;27.1.12297006 cmake;3.22.1
+          # Do not install obsolete `tools` — sdkmanager no longer provides it.
+          packages: platform-tools platforms;android-36 build-tools;36.0.0 ndk;27.1.12297006 cmake;3.22.1
 
       - name: Setup Vite+
         uses: voidzero-dev/setup-vp@v1
