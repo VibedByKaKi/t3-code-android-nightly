@@ -194,6 +194,7 @@ jobs:
     timeout-minutes: 180
     env:
       APP_VARIANT: preview
+      T3CODE_MOBILE_UPDATES_ENABLED: "0"
       NODE_OPTIONS: --max-old-space-size=8192
       EXPO_NO_GIT_STATUS: "1"
       GRADLE_OPTS: -Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx6g
@@ -256,10 +257,6 @@ jobs:
             if old not in text:
               raise SystemExit(f"missing expected snippet: {old}")
             text = text.replace(old, new, 1)
-          needle = "updates: {\n    enabled: true,"
-          if needle not in text:
-            raise SystemExit("missing updates.enabled block")
-          text = text.replace(needle, "updates: {\n    enabled: false,", 1)
           path.write_text(text)
           print("Retargeted preview variant for nightly APK builds")
           PY
