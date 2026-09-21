@@ -46,6 +46,7 @@ import {
   buildDocJson,
   buildTiptapContent,
   collapsedToFlat,
+  ComposerCodeExtension,
   ComposerTaskItemExtension,
   flatToCollapsed,
   flatToMarkdown,
@@ -136,7 +137,7 @@ export interface ComposerPromptEditorProps {
   ) => void;
   onVisibleSelectionChange?: () => void;
   onCommandKeyDown?: (
-    key: "ArrowDown" | "ArrowUp" | "Enter" | "Tab",
+    key: "ArrowDown" | "ArrowUp" | "Enter" | "Tab" | "Escape",
     event: KeyboardEvent,
     isTaskItem?: boolean,
   ) => boolean;
@@ -754,8 +755,9 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
           dropcursor: false,
           gapcursor: false,
           trailingNode: false,
+          code: false,
           // Plain mode has no marks: typed markers stay literal characters.
-          ...(richText ? {} : { bold: false, italic: false, strike: false, code: false }),
+          ...(richText ? {} : { bold: false, italic: false, strike: false }),
         }),
         ComposerMentionExtension,
         ComposerSkillExtension,
@@ -764,6 +766,7 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
         ComposerMarkersExtension,
         ...(richText
           ? [
+              ComposerCodeExtension,
               TaskList,
               ComposerTaskItemExtension.extend({
                 addInputRules() {
@@ -909,7 +912,9 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
                 ? ("ArrowDown" as const)
                 : event.key === "ArrowUp"
                   ? ("ArrowUp" as const)
-                  : null;
+                  : event.key === "Escape"
+                    ? ("Escape" as const)
+                    : null;
           if (!key) return false;
           const handled = handler(key, event);
           if (handled) {
