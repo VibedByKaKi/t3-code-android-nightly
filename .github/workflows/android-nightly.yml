@@ -258,15 +258,6 @@ jobs:
             if old not in text:
               raise SystemExit(f"missing expected snippet: {old}")
             text = text.replace(old, new, 1)
-          # Some devices fail DirectApkSoSource dependency resolution for
-          # libfbjni.so when extractNativeLibs=false (empty lib/arm64). Legacy
-          # packaging extracts native libs at install time.
-          if "useLegacyPackaging" not in text:
-            pattern = r'(("expo-build-properties",\s*\{\s*android:\s*\{))'
-            match = re.search(pattern, text)
-            if not match:
-              raise SystemExit("expo-build-properties android block not found")
-            text = text[: match.end()] + "\n          useLegacyPackaging: true," + text[match.end() :]
           path.write_text(text)
           print("Retargeted preview variant for nightly APK builds")
           PY
@@ -291,48 +282,30 @@ jobs:
         working-directory: apps/mobile
         run: pnpm exec expo prebuild --platform android --clean --non-interactive
 
-      - name: Force extractable native libs
+      # fbjni 0.8.0+ (Maven Central, 2026-09-25) references
+      # __cxa_init_primary_exception, which the libc++_shared.so shipped with
+      # React Native does not export. Gradle was resolving past RN's declared
+      # 0.7.0 and the APK crashed in JNI_OnLoad on load. Pin the RN-matched
+      # artifact so nightlies stay ABI-compatible.
+      - name: Pin fbjni 0.7.0
         run: |
           python3 <<'PY'
           from pathlib import Path
-          import re
-          app_gradle = Path("apps/mobile/android/app/build.gradle")
-          text = app_gradle.read_text()
-          if "useLegacyPackaging" not in text:
-            if re.search(r"packaging\s*\{", text):
-              text = re.sub(
-                  r"(packaging\s*\{)",
-                  r"\1\n        jniLibs {\n            useLegacyPackaging true\n        }",
-                  text,
-                  count=1,
-              )
-            else:
-              text = re.sub(
-                  r"(android\s*\{)",
-                  r"\1\n    packaging {\n        jniLibs {\n            useLegacyPackaging true\n        }\n    }",
-                  text,
-                  count=1,
-              )
-            app_gradle.write_text(text)
-
-          manifest = Path("apps/mobile/android/app/src/main/AndroidManifest.xml")
-          man = manifest.read_text()
-          if 'android:extractNativeLibs="true"' not in man:
-            if "android:extractNativeLibs=" in man:
-              man = re.sub(
-                  r'android:extractNativeLibs="[^"]*"',
-                  'android:extractNativeLibs="true"',
-                  man,
-                  count=1,
-              )
-            else:
-              man = man.replace(
-                  "<application",
-                  '<application android:extractNativeLibs="true"',
-                  1,
-              )
-            manifest.write_text(man)
-          print("Forced legacy/extractable native lib packaging")
+          root = Path("apps/mobile/android/build.gradle")
+          text = root.read_text()
+          marker = "force \"com.facebook.fbjni:fbjni:0.7.0\""
+          if marker not in text:
+            block = """
+          // Nightly CI: keep fbjni on the RN-declared ABI (see workflow).
+          subprojects { subproject ->
+              subproject.configurations.configureEach {
+                  resolutionStrategy.force "com.facebook.fbjni:fbjni:0.7.0"
+              }
+          }
+          """
+            text = text.rstrip() + "\n" + block + "\n"
+            root.write_text(text)
+          print("Pinned com.facebook.fbjni:fbjni:0.7.0")
           PY
 
       - name: Configure release signing
