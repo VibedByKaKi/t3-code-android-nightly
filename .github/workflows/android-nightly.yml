@@ -246,6 +246,7 @@ jobs:
         run: |
           python3 <<'PY'
           from pathlib import Path
+          import re
           path = Path("apps/mobile/app.config.ts")
           text = path.read_text()
           replacements = [
@@ -257,6 +258,15 @@ jobs:
             if old not in text:
               raise SystemExit(f"missing expected snippet: {old}")
             text = text.replace(old, new, 1)
+          # Some devices fail DirectApkSoSource dependency resolution for
+          # libfbjni.so when extractNativeLibs=false (empty lib/arm64). Legacy
+          # packaging extracts native libs at install time.
+          if "useLegacyPackaging" not in text:
+            pattern = r'(("expo-build-properties",\s*\{\s*android:\s*\{))'
+            match = re.search(pattern, text)
+            if not match:
+              raise SystemExit("expo-build-properties android block not found")
+            text = text[: match.end()] + "\n          useLegacyPackaging: true," + text[match.end() :]
           path.write_text(text)
           print("Retargeted preview variant for nightly APK builds")
           PY
@@ -280,6 +290,45 @@ jobs:
       - name: Expo prebuild (Android)
         working-directory: apps/mobile
         run: pnpm exec expo prebuild --platform android --clean --non-interactive
+
+      - name: Force extractable native libs
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+          gradle = Path("apps/mobile/android/gradle.properties")
+          props = gradle.read_text() if gradle.exists() else ""
+          if "android.bundle.enableUncompressedNativeLibs" in props:
+            props = re.sub(
+              r"android\.bundle\.enableUncompressedNativeLibs\s*=\s*.*",
+              "android.bundle.enableUncompressedNativeLibs=false",
+              props,
+            )
+          else:
+            props += "\nandroid.bundle.enableUncompressedNativeLibs=false\n"
+          gradle.write_text(props)
+
+          app_gradle = Path("apps/mobile/android/app/build.gradle")
+          text = app_gradle.read_text()
+          if "useLegacyPackaging" not in text:
+            # Prefer packaging { jniLibs { useLegacyPackaging true } } in android {}
+            if re.search(r"packaging\s*\{", text):
+              text = re.sub(
+                  r"(packaging\s*\{)",
+                  r"\1\n        jniLibs {\n            useLegacyPackaging true\n        }",
+                  text,
+                  count=1,
+              )
+            else:
+              text = re.sub(
+                  r"(android\s*\{)",
+                  r"\1\n    packaging {\n        jniLibs {\n            useLegacyPackaging true\n        }\n    }",
+                  text,
+                  count=1,
+              )
+            app_gradle.write_text(text)
+          print("Forced legacy/extractable native lib packaging")
+          PY
 
       - name: Configure release signing
         run: python3 .nightly-ci/.github/scripts/configure-nightly-signing.py
