@@ -296,22 +296,9 @@ jobs:
           python3 <<'PY'
           from pathlib import Path
           import re
-          gradle = Path("apps/mobile/android/gradle.properties")
-          props = gradle.read_text() if gradle.exists() else ""
-          if "android.bundle.enableUncompressedNativeLibs" in props:
-            props = re.sub(
-              r"android\.bundle\.enableUncompressedNativeLibs\s*=\s*.*",
-              "android.bundle.enableUncompressedNativeLibs=false",
-              props,
-            )
-          else:
-            props += "\nandroid.bundle.enableUncompressedNativeLibs=false\n"
-          gradle.write_text(props)
-
           app_gradle = Path("apps/mobile/android/app/build.gradle")
           text = app_gradle.read_text()
           if "useLegacyPackaging" not in text:
-            # Prefer packaging { jniLibs { useLegacyPackaging true } } in android {}
             if re.search(r"packaging\s*\{", text):
               text = re.sub(
                   r"(packaging\s*\{)",
@@ -327,6 +314,24 @@ jobs:
                   count=1,
               )
             app_gradle.write_text(text)
+
+          manifest = Path("apps/mobile/android/app/src/main/AndroidManifest.xml")
+          man = manifest.read_text()
+          if 'android:extractNativeLibs="true"' not in man:
+            if "android:extractNativeLibs=" in man:
+              man = re.sub(
+                  r'android:extractNativeLibs="[^"]*"',
+                  'android:extractNativeLibs="true"',
+                  man,
+                  count=1,
+              )
+            else:
+              man = man.replace(
+                  "<application",
+                  '<application android:extractNativeLibs="true"',
+                  1,
+              )
+            manifest.write_text(man)
           print("Forced legacy/extractable native lib packaging")
           PY
 
