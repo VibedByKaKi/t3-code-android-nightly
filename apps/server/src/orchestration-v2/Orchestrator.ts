@@ -39,6 +39,7 @@ import {
   type OrchestrationV2Subagent,
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2TurnItem,
+  orchestrationV2RunWorkStartedAt,
   ProviderInstanceId,
   type ProviderSessionId,
   RunId,
@@ -302,6 +303,37 @@ export class OrchestratorV2 extends Context.Service<OrchestratorV2, Orchestrator
 
 function nextRunOrdinal(projection: Pick<OrchestrationV2ThreadProjection, "runs">): number {
   return projection.runs.length + 1;
+}
+
+/**
+ * A wake (background notification, delegated task result, restart
+ * continuation) carries on the work of the run that started last, so it keeps
+ * that work's start. Stamp it when the wake run starts, not when it queues:
+ * a queued prompt ahead of it has no start yet, and delegated results jump
+ * the queue. Other runs start new work.
+ */
+function wakeWorkStartedAt(
+  runs: ReadonlyArray<OrchestrationV2Run>,
+  trigger: {
+    readonly notification?: unknown;
+    readonly delegatedCompletion?: unknown;
+    readonly restartContinuationOfRunId?: RunId | undefined;
+  },
+): Pick<OrchestrationV2Run, "workStartedAt"> {
+  if (
+    trigger.notification === undefined &&
+    trigger.delegatedCompletion === undefined &&
+    trigger.restartContinuationOfRunId === undefined
+  ) {
+    return {};
+  }
+  const previous = runs
+    .flatMap((run) => (run.startedAt === null ? [] : [{ run, startedAt: run.startedAt }]))
+    .toSorted(
+      (left, right) =>
+        DateTime.Order(right.startedAt, left.startedAt) || right.run.ordinal - left.run.ordinal,
+    )[0]?.run;
+  return previous === undefined ? {} : { workStartedAt: orchestrationV2RunWorkStartedAt(previous) };
 }
 
 function isNativeMaintenanceCommand(message: {
@@ -1459,6 +1491,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         queuePosition: null,
         startedAt: null,
         contextHandoffId: activeHandoff?.id ?? null,
+        ...wakeWorkStartedAt(projection.runs, {
+          notification: queuedMessage.notification,
+          delegatedCompletion: queuedMessage.delegatedCompletion,
+          restartContinuationOfRunId: queuedRun.restartContinuationOfRunId,
+        }),
       };
       const userTurnItem: OrchestrationV2TurnItem = {
         ...(legacyQueuedTurnItem ?? {
@@ -4949,6 +4986,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ...(command.restartContinuationOfRunId === undefined
             ? {}
             : { restartContinuationOfRunId: command.restartContinuationOfRunId }),
+          ...wakeWorkStartedAt(projection.runs, command),
         };
         const attempt: OrchestrationV2RunAttempt = {
           id: attemptId,
@@ -5642,6 +5680,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(command.restartContinuationOfRunId === undefined
           ? {}
           : { restartContinuationOfRunId: command.restartContinuationOfRunId }),
+        ...wakeWorkStartedAt(projection.runs, command),
       };
       const attempt: OrchestrationV2RunAttempt = {
         id: attemptId,
@@ -7990,32 +8029,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }),
       );
 
-      /*
-       * TODO(interrupt-hardening): before shipping, make these interrupt
-       * semantics explicit in tests and policy.
-       *
-       * Current behavior:
-       * - emit a `run_interrupt_request` item as user intent;
-       * - call the provider interrupt RPC;
-       * - keep the run active and continue ingesting provider chunks;
-       * - let RunExecutionService emit `run_interrupt_result` only if the
-       *   provider later reports terminal status `interrupted`.
-       *
-       * Known scenarios we do not fully harden yet:
-       * - provider accepts interrupt, then emits more chunks before terminal;
-       * - provider accepts interrupt, then completes normally instead;
-       * - provider accepts interrupt but never terminalizes;
-       * - user queues, steers, or starts another message while the interrupted
-       *   provider turn is still active.
-       *
-       * Likely policy:
-       * - queue should wait behind the still-active provider turn;
-       * - explicit steer may target the active turn if provider steering is
-       *   supported;
-       * - starting a new root turn before provider terminalization should be
-       *   an explicit policy decision because it can weaken native-item
-       *   correlation.
-       */
+      // Open interrupt edge cases are tracked in https://github.com/pingdotgg/t3code/issues/15013.
       yield* emitEvent({
         type: "turn-item.updated",
         threadId: command.threadId,
