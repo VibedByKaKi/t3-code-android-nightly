@@ -1,5 +1,8 @@
 # T3 Code Android Nightly
 
+![](https://shields.kaki87.net/github/downloads/VibedByKaKi/t3-code-android-nightly/total?label=downloads%40all)
+![](https://shields.kaki87.net/github/downloads-pre/VibedByKaKi/t3-code-android-nightly/latest/total)
+
 Unofficial Android APK builds of [T3 Code](https://github.com/pingdotgg/t3code), rebuilt from `main` whenever upstream moves.
 
 This is not an official Ping / T3 Tools release. Package id is `com.vibedbykaki.t3code.nightly` so it can sit next to store or preview builds.
