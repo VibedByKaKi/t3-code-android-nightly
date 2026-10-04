@@ -29,14 +29,21 @@ jobs:
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # Fine-grained PAT with Contents + Workflows + Actions write so we can
+          # push upstream history (including workflow files) onto main.
+          token: ${{ secrets.NIGHTLY_SYNC_TOKEN }}
 
       - name: Sync upstream main into origin/main
         id: sync
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.NIGHTLY_SYNC_TOKEN }}
         run: |
           set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "NIGHTLY_SYNC_TOKEN secret is required" >&2
+            exit 1
+          fi
+
           git remote add upstream https://github.com/pingdotgg/t3code.git 2>/dev/null || git remote set-url upstream https://github.com/pingdotgg/t3code.git
           git fetch --no-tags upstream main
           git fetch --no-tags origin main || true
@@ -52,63 +59,21 @@ jobs:
             main_sha=""
           fi
 
-          # GITHUB_TOKEN cannot create/update workflow files. Mirror upstream
-          # content onto main while pinning origin's .github/workflows so the
-          # push never touches workflows, even when upstream changes them.
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
           synced=false
-          needs_mirror=false
-          if [ -z "$main_sha" ]; then
-            needs_mirror=true
+          if [ "$main_sha" = "$upstream_sha" ]; then
+            echo "origin/main already at upstream tip $short_sha"
           else
-            non_workflow_changes="$(
-              git diff --name-only "$main_sha" "$upstream_sha" \
-                | grep -v '^\.github/workflows/' \
-                || true
-            )"
-            if [ -n "$non_workflow_changes" ]; then
-              needs_mirror=true
+            # Push official upstream history as-is. Force is needed once to leave
+            # the old mirror-commit history; later syncs fast-forward when possible.
+            if [ -n "$main_sha" ] && git merge-base --is-ancestor "$main_sha" "$upstream_sha"; then
+              git push origin "$upstream_sha:refs/heads/main"
+            elif [ -n "$main_sha" ]; then
+              git push --force-with-lease=refs/heads/main:"$main_sha" origin "$upstream_sha:refs/heads/main"
             else
-              echo "origin/main already mirrors upstream app content ($short_sha)"
+              git push --force origin "$upstream_sha:refs/heads/main"
             fi
-          fi
-
-          if [ "$needs_mirror" = true ]; then
-            if [ -n "$main_sha" ]; then
-              git checkout -B mirror/main "$main_sha"
-            else
-              git checkout -B mirror/main "$upstream_sha"
-            fi
-            git read-tree -um "$upstream_sha"
-            if [ -n "$main_sha" ] && git cat-file -e "$main_sha:.github/workflows" 2>/dev/null; then
-              git checkout "$main_sha" -- .github/workflows
-              while IFS= read -r -d '' path; do
-                if ! git cat-file -e "$main_sha:$path" 2>/dev/null; then
-                  git rm -f --ignore-unmatch -- "$path" || true
-                fi
-              done < <(git ls-files -z -- .github/workflows)
-            else
-              git rm -rf --ignore-unmatch .github/workflows || true
-            fi
-
-            if git diff --cached --quiet && git diff --quiet; then
-              echo "Mirror tree already matches desired state for $short_sha"
-            else
-              git commit -m "chore(mirror): sync upstream ${short_sha}"
-            fi
-
-            tip_sha="$(git rev-parse HEAD)"
-            if [ "$tip_sha" = "$main_sha" ]; then
-              echo "No new mirror commit to push"
-            else
-              # Single commit on top of origin/main: app content from upstream,
-              # workflows unchanged vs origin, so GITHUB_TOKEN can push it.
-              git push origin "HEAD:refs/heads/main"
-              synced=true
-              echo "Updated origin/main to mirror of $short_sha (tip $tip_sha)"
-            fi
+            synced=true
+            echo "Updated origin/main to upstream $short_sha"
           fi
           echo "synced=$synced" >> "$GITHUB_OUTPUT"
 
@@ -165,7 +130,7 @@ jobs:
       - name: Cancel inherited upstream workflow runs on main
         if: steps.sync.outputs.synced == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.NIGHTLY_SYNC_TOKEN }}
         run: |
           set -euo pipefail
           # Pushing upstream commits onto main can enqueue Blacksmith/EAS workflows
