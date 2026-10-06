@@ -316,12 +316,26 @@ jobs:
 
           git remote add upstream https://github.com/pingdotgg/t3code.git 2>/dev/null \
             || git remote set-url upstream https://github.com/pingdotgg/t3code.git
+          # Build checks out main shallow (depth 1). Unshallow so the changelog
+          # range previous_sha..upstream_sha resolves; a tip-only upstream fetch
+          # is not enough and previously failed publish with exit 128.
+          if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+            git fetch --no-tags --unshallow origin || git fetch --no-tags --deepen=2147483647 origin
+          fi
           git fetch --no-tags upstream main
+          if [ -n "$previous_sha" ] && ! git cat-file -e "${previous_sha}^{commit}" 2>/dev/null; then
+            git fetch --no-tags upstream "$previous_sha"
+          fi
 
           commits_file="$(mktemp)"
           if [ -n "$previous_sha" ] && [ "$previous_sha" != "$upstream_sha" ]; then
-            git log --reverse --pretty=format:'- [%h](https://github.com/pingdotgg/t3code/commit/%H) %s%n' \
-              "$previous_sha..$upstream_sha" -- apps/mobile > "$commits_file"
+            if git cat-file -e "${previous_sha}^{commit}" 2>/dev/null \
+              && git cat-file -e "${upstream_sha}^{commit}" 2>/dev/null; then
+              git log --reverse --pretty=format:'- [%h](https://github.com/pingdotgg/t3code/commit/%H) %s%n' \
+                "$previous_sha..$upstream_sha" -- apps/mobile > "$commits_file" || true
+            else
+              echo "Skipping changelog range; missing commit objects" >&2
+            fi
           fi
 
           if [ ! -s "$commits_file" ]; then
@@ -345,7 +359,7 @@ jobs:
               "## Commits affecting the Android app" \
               ""
             if [ -n "$previous_sha" ]; then
-              prev_short="$(git rev-parse --short=12 "$previous_sha")"
+              prev_short="$(git rev-parse --short=12 "$previous_sha" 2>/dev/null || printf '%.12s' "$previous_sha")"
               printf '%s\n\n' "Since [\`${prev_short}\`](https://github.com/pingdotgg/t3code/commit/${previous_sha}) (commits touching \`apps/mobile\`):"
             fi
             cat "$commits_file"
