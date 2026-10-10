@@ -1,7 +1,8 @@
 # T3 Code Android Nightly
 
-![](https://shields.kaki87.net/github/downloads/VibedByKaKi/t3-code-android-nightly/total?label=downloads%40all)
-![](https://shields.kaki87.net/github/downloads-pre/VibedByKaKi/t3-code-android-nightly/latest/total)
+![](https://shields.kaki87.net/badge/dynamic/json?url=https%3A%2F%2Fapi.github.com%2Frepos%2FVibedByKaKi%2Ft3-code-android-nightly%2Freleases%3Fper_page%3D100&query=%24.length&label=releases&logo=github&color=blue)
+![](https://shields.kaki87.net/github/downloads/VibedByKaKi/t3-code-android-nightly/total?label=downloads%40all&logo=github)
+![](https://shields.kaki87.net/github/downloads-pre/VibedByKaKi/t3-code-android-nightly/latest/total?logo=github)
 
 Unofficial Android APK builds of [T3 Code](https://github.com/pingdotgg/t3code), rebuilt from `main` whenever upstream moves.
 
