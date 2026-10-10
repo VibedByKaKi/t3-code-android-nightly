@@ -18,3 +18,5 @@ This is not an official Ping / T3 Tools release. Package id is `com.vibedbykaki.
 </p>
 
 Source lives on [`main`](https://github.com/VibedByKaKi/t3-code-android-nightly/tree/main). APKs ship as GitHub prereleases. In Obtainium, keep **Include pre-releases** on if you added the repo by hand.
+
+![](https://api.star-history.com/svg?repos=vibedbykaki%2Ft3-code-android-nightly&type=Timeline&theme=dark)
